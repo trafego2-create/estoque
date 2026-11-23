@@ -19,6 +19,7 @@ Rotas:
   /api/colaboradores           POST          cadastra pessoa
   /api/colaboradores/{id}      PATCH
   /api/exportar.csv            GET           planilha do estoque
+  /api/integracao/*                          leitura para outros sistemas (ver integracao.py)
 """
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import config, dados, regras, security
+from . import config, dados, integracao, regras, security
 
 PUBLIC = Path(__file__).resolve().parent.parent / "public"
 COOKIE = "brabo_estoque"
@@ -358,5 +359,8 @@ async def healthz():
 async def _invalido(_req: Request, exc: regras.Invalido):
     return JSONResponse({"detail": str(exc)}, status_code=400)
 
+
+# integração com outros sistemas da empresa (Radar de Projetos)
+app.include_router(integracao.router)
 
 app.mount("/", StaticFiles(directory=PUBLIC, html=True), name="public")

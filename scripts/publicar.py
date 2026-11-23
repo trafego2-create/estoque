@@ -110,11 +110,21 @@ def main() -> int:
         arq_prod.write_text(f"SESSION_SECRET={prod['SESSION_SECRET']}\n", encoding="utf-8")
         print("gerei o SESSION_SECRET de produção e guardei em .env.producao (fora do git)")
 
+    # chave que o Radar de Projetos usa para ler o estoque (uma chave por sistema)
+    if not prod.get("CHAVE_RADAR"):
+        prod["CHAVE_RADAR"] = secrets.token_urlsafe(32)
+        print("gerei a CHAVE_RADAR e guardei em .env.producao (o script do Radar lê daqui)")
+    arq_prod.write_text(
+        f"SESSION_SECRET={prod['SESSION_SECRET']}\nCHAVE_RADAR={prod['CHAVE_RADAR']}\n",
+        encoding="utf-8")
+
     env = "\n".join([
         f"DATABASE_URL={local['DATABASE_URL']}",
         f"SESSION_SECRET={prod['SESSION_SECRET']}",
         "COOKIE_SECURE=1",
         "SESSAO_HORAS=720",
+        "URL_PUBLICA=https://automacoes-estoque.qacfzn.easypanel.host",
+        f"CHAVES_INTEGRACAO=radar={prod['CHAVE_RADAR']}",
     ])
 
     mcp = Mcp(PAINEL, chave)

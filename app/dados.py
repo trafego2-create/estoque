@@ -54,6 +54,12 @@ def equipamento(eid: int) -> dict | None:
     return jsonavel(db.um(SELECT_EQUIP + " where e.id = %s", (eid,)))
 
 
+def por_patrimonio(patrimonio: str) -> dict | None:
+    """Busca pelo código de patrimônio, ignorando maiúscula/minúscula e espaços."""
+    return jsonavel(db.um(
+        SELECT_EQUIP + " where e.patrimonio_norm = nullif(upper(btrim(%s)), '')", (patrimonio,)))
+
+
 def colaboradores() -> list[dict]:
     return jsonavel(db.consultar("""
         select c.id, c.nome, c.setor, c.cargo, c.email, c.ativo, c.observacao, c.criado_em,

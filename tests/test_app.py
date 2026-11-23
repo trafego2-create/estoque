@@ -275,3 +275,65 @@ def test_troca_de_senha_derruba_o_cookie_antigo(cliente, banco):
     antigo.cookies.set(main.COOKIE, security.assinar(
         {"uid": 1, "ver": "versao-velha"}, ttl_s=3600))
     assert antigo.get("/api/dados").status_code == 401
+
+
+# ───────────────────────── integração (Radar de Projetos) ─────────────────────────
+@pytest.fixture
+def integra(banco, monkeypatch):
+    """Cliente sem login, mas com a chave de integração do Radar."""
+    from app import config, dados as d
+    monkeypatch.setattr(config, "CHAVES_INTEGRACAO", "radar=chave-de-teste")
+    monkeypatch.setattr(d, "por_patrimonio", lambda pat: next(
+        (e for e in banco.equipamentos.values()
+         if (e.get("patrimonio") or "").upper() == (pat or "").upper().strip()), None))
+    return TestClient(main.app)
+
+
+def test_integracao_exige_chave(integra):
+    assert integra.get("/api/integracao/estoque").status_code == 401
+    r = integra.get("/api/integracao/estoque", headers={"X-Chave": "chute"})
+    assert r.status_code == 401
+
+
+def test_integracao_le_estoque_sem_expor_valor(integra, cliente):
+    cliente.post("/api/equipamentos", json={
+        "patrimonio": "BRB-50", "tipo": "Notebook", "setor": "Comercial",
+        "valor": "4200,00", "observacao": "arranhado na tampa"})
+    r = integra.get("/api/integracao/estoque", headers={"X-Chave": "chave-de-teste"})
+    assert r.status_code == 200
+    corpo = r.json()
+    assert corpo["disponivel_por_tipo"] == {"Notebook": 1}
+    item = corpo["itens"][0]
+    assert item["patrimonio"] == "BRB-50"
+    assert "valor" not in item and "observacao" not in item
+
+
+def test_integracao_entrega_fecha_pedido_do_radar(integra, cliente):
+    cliente.post("/api/equipamentos", json={"patrimonio": "BRB-51", "tipo": "Monitor"})
+    r = integra.post("/api/integracao/entregar",
+                     headers={"X-Chave": "chave-de-teste"},
+                     json={"patrimonio": "brb-51", "colaborador_nome": "Ana Souza",
+                           "setor": "CX", "por": "mateus@aprovasim.com",
+                           "origem_id": "pedido-77"})
+    assert r.status_code == 200
+    assert r.json()["acao"] == "entrega"
+    assert r.json()["equipamento"]["colaborador_nome"] == "Ana Souza"
+    # repetir a mesma chamada não move o item de novo
+    repetido = integra.post("/api/integracao/entregar",
+                            headers={"X-Chave": "chave-de-teste"},
+                            json={"patrimonio": "brb-51", "colaborador_nome": "Ana Souza",
+                                  "origem_id": "pedido-77"})
+    assert repetido.json() == {"repetido": True}
+
+
+def test_integracao_entrega_item_inexistente(integra):
+    r = integra.post("/api/integracao/entregar", headers={"X-Chave": "chave-de-teste"},
+                     json={"patrimonio": "NAO-EXISTE", "colaborador_nome": "Ana"})
+    assert r.status_code == 404
+
+
+def test_integracao_entrega_exige_pessoa(integra, cliente):
+    cliente.post("/api/equipamentos", json={"patrimonio": "BRB-52", "tipo": "Mouse"})
+    r = integra.post("/api/integracao/entregar", headers={"X-Chave": "chave-de-teste"},
+                     json={"patrimonio": "BRB-52"})
+    assert r.status_code == 400

@@ -38,5 +38,22 @@ COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "1") != "0"
 SESSAO_HORAS = int(os.environ.get("SESSAO_HORAS", "720"))  # 30 dias: é celular em uso na empresa
 
 
+# Endereço do site, usado nos links que mandamos para outros sistemas
+URL_PUBLICA = os.environ.get("URL_PUBLICA", "https://automacoes-estoque.qacfzn.easypanel.host")
+
+# Chaves de integração, uma por sistema que lê o estoque: "radar=abc123,outro=def456"
+CHAVES_INTEGRACAO = os.environ.get("CHAVES_INTEGRACAO", "")
+
+
+def chaves_integracao() -> dict[str, str]:
+    """{nome do sistema: chave}. Sem nada configurado, ninguém entra pela integração."""
+    saida: dict[str, str] = {}
+    for parte in CHAVES_INTEGRACAO.split(","):
+        nome, _, chave = parte.partition("=")
+        if nome.strip() and chave.strip():
+            saida[nome.strip()] = chave.strip()
+    return saida
+
+
 def banco_configurado() -> bool:
     return bool(DATABASE_URL)
