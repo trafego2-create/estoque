@@ -28,7 +28,7 @@ import hashlib
 import io
 import json
 import time
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -36,7 +36,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import config, dados, integracao, regras, security
+from . import config, dados, integracao, operacoes, regras, security
 
 PUBLIC = Path(__file__).resolve().parent.parent / "public"
 COOKIE = "brabo_estoque"
@@ -64,25 +64,6 @@ async def corpo_json(req: Request) -> dict:
     if not isinstance(dados_corpo, dict):
         raise HTTPException(400, "Formato inesperado.")
     return dados_corpo
-
-
-@contextmanager
-def erro_amigavel():
-    """Erro do banco virando mensagem que faz sentido na tela (o resto sobe como 500)."""
-    try:
-        yield
-    except Exception as exc:
-        nome = type(exc).__name__
-        if nome == "UniqueViolation":
-            if "patrimonio" in str(exc):
-                raise HTTPException(
-                    409, "Esse código de patrimônio já está cadastrado em outro item.") from exc
-            raise HTTPException(409, "Esse registro já existe.") from exc
-        if nome == "CheckViolation":
-            raise HTTPException(400, "Combinação de situação e colaborador inválida.") from exc
-        if nome == "ForeignKeyViolation":
-            raise HTTPException(400, "Colaborador não encontrado.") from exc
-        raise
 
 
 # ───────────────────────────── login ─────────────────────────────
@@ -189,74 +170,29 @@ async def tela(req: Request):
                     headers={"ETag": etag, "Cache-Control": "no-cache"})
 
 
-def _resolve_pessoa(corpo: dict, status: str) -> int | None:
-    """Aceita colaborador_id OU um nome digitado na hora (cadastra a pessoa se for novo)."""
-    if status != "com_colaborador":
-        return None
-    cid = corpo.get("colaborador_id")
-    if cid:
-        return int(cid)
-    nome = regras.texto(corpo.get("colaborador_nome"), 160)
-    if not nome:
-        raise regras.Invalido("Diga com qual colaborador o equipamento está.")
-    pessoa = dados.achar_ou_criar_colaborador(
-        nome, regras.texto(corpo.get("colaborador_setor") or corpo.get("setor"), 80))
-    return pessoa["id"]
-
-
 @app.post("/api/equipamentos")
 async def cadastrar(req: Request):
     usuario = usuario_logado(req)
     corpo = await corpo_json(req)
-    origem = regras.texto(corpo.get("origem_id"), 80)
-    if origem:  # reenvio da fila offline: já gravamos este bilhete?
-        ja = dados.por_origem(origem)
-        if ja:
-            return {"equipamento": ja, "repetido": True}
-    limpo = regras.equipamento_do_formulario(corpo)
-    with erro_amigavel():
-        limpo["colaborador_id"] = _resolve_pessoa(corpo, limpo["status"])
-        novo = dados.criar_equipamento(limpo, usuario["email"], origem)
-    return {"equipamento": novo}
+    novo, repetido = operacoes.cadastrar(corpo, usuario["email"],
+                                         regras.texto(corpo.get("origem_id"), 80))
+    return {"equipamento": novo, "repetido": repetido} if repetido else {"equipamento": novo}
 
 
 @app.patch("/api/equipamentos/{eid}")
 async def editar(eid: int, req: Request):
     usuario = usuario_logado(req)
     corpo = await corpo_json(req)
-    atual = dados.equipamento(eid)
-    if not atual:
-        raise HTTPException(404, "Equipamento não encontrado.")
-    limpo = regras.equipamento_do_formulario({**atual, **corpo})
-    with erro_amigavel():
-        limpo["colaborador_id"] = _resolve_pessoa({**atual, **corpo}, limpo["status"])
-        novo = dados.editar_equipamento(eid, limpo, usuario["email"])
-    return {"equipamento": novo}
+    return {"equipamento": operacoes.editar(eid, corpo, usuario["email"])}
 
 
 @app.post("/api/equipamentos/{eid}/mover")
 async def mover(eid: int, req: Request):
     usuario = usuario_logado(req)
     corpo = await corpo_json(req)
-    origem = regras.texto(corpo.get("origem_id"), 80)
-    if origem and dados.movimento_por_origem(origem):
-        return {"equipamento": dados.equipamento(eid), "repetido": True}
-    acao = (corpo.get("acao") or "").strip().lower()
-    atual = dados.equipamento(eid)
-    if not atual:
-        raise HTTPException(404, "Equipamento não encontrado.")
-    with erro_amigavel():
-        pessoa = corpo.get("colaborador_id")
-        if not pessoa and regras.texto(corpo.get("colaborador_nome"), 160):
-            pessoa = dados.achar_ou_criar_colaborador(
-                regras.texto(corpo.get("colaborador_nome"), 160),
-                regras.texto(corpo.get("colaborador_setor") or corpo.get("setor"), 80))["id"]
-        regra = regras.confere_acao(acao, pessoa)
-        novo = dados.movimentar(
-            eid, acao, regra["status"], int(pessoa) if regra["exige_pessoa"] else None,
-            regras.texto(corpo.get("setor"), 80), regras.texto(corpo.get("observacao"), 1000),
-            usuario["email"], origem)
-    return {"equipamento": novo}
+    novo, repetido = operacoes.mover(eid, corpo, usuario["email"],
+                                     regras.texto(corpo.get("origem_id"), 80))
+    return {"equipamento": novo, "repetido": repetido} if repetido else {"equipamento": novo}
 
 
 @app.get("/api/equipamentos/{eid}/historico")
@@ -268,41 +204,20 @@ async def historico(eid: int, req: Request):
 @app.delete("/api/equipamentos/{eid}")
 async def apagar(eid: int, req: Request):
     supervisor(req)
-    if not dados.excluir_equipamento(eid):
-        raise HTTPException(404, "Equipamento não encontrado.")
+    operacoes.excluir(eid)
     return {"ok": True}
 
 
 @app.post("/api/colaboradores")
 async def nova_pessoa(req: Request):
     usuario_logado(req)
-    corpo = await corpo_json(req)
-    nome = regras.texto(corpo.get("nome"), 160)
-    if not nome:
-        raise regras.Invalido("Diga o nome do colaborador.")
-    with erro_amigavel():
-        pessoa = dados.achar_ou_criar_colaborador(
-            nome, regras.texto(corpo.get("setor"), 80), regras.texto(corpo.get("cargo"), 80),
-            regras.texto(corpo.get("email"), 160))
-    return {"colaborador": dados.jsonavel(pessoa)}
+    return {"colaborador": operacoes.nova_pessoa(await corpo_json(req))}
 
 
 @app.patch("/api/colaboradores/{cid}")
 async def editar_pessoa(cid: int, req: Request):
     usuario_logado(req)
-    corpo = await corpo_json(req)
-    with erro_amigavel():
-        pessoa = dados.editar_colaborador(cid, {
-            "nome": regras.texto(corpo.get("nome"), 160),
-            "setor": regras.texto(corpo.get("setor"), 80),
-            "cargo": regras.texto(corpo.get("cargo"), 80),
-            "email": regras.texto(corpo.get("email"), 160),
-            "observacao": regras.texto(corpo.get("observacao"), 1000),
-            "ativo": corpo.get("ativo"),
-        })
-    if not pessoa:
-        raise HTTPException(404, "Colaborador não encontrado.")
-    return {"colaborador": pessoa}
+    return {"colaborador": operacoes.editar_pessoa(cid, await corpo_json(req))}
 
 
 COLUNAS_CSV = [
@@ -353,6 +268,16 @@ async def exportar(req: Request):
 @app.get("/healthz")
 async def healthz():
     return {"ok": True, "banco": config.banco_configurado()}
+
+
+@app.exception_handler(operacoes.JaExiste)
+async def _ja_existe(_req: Request, exc: operacoes.JaExiste):
+    return JSONResponse({"detail": str(exc)}, status_code=409)
+
+
+@app.exception_handler(operacoes.NaoEncontrado)
+async def _nao_encontrado(_req: Request, exc: operacoes.NaoEncontrado):
+    return JSONResponse({"detail": str(exc)}, status_code=404)
 
 
 @app.exception_handler(regras.Invalido)

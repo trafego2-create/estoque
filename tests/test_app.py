@@ -337,3 +337,131 @@ def test_integracao_entrega_exige_pessoa(integra, cliente):
     r = integra.post("/api/integracao/entregar", headers={"X-Chave": "chave-de-teste"},
                      json={"patrimonio": "BRB-52"})
     assert r.status_code == 400
+
+
+# ───────── integração: o Radar faz tudo o que a tela faz ─────────
+CH = {"X-Chave": "chave-de-teste"}
+
+
+def test_integracao_cadastra_item(integra):
+    r = integra.post("/api/integracao/equipamentos", headers=CH, json={
+        "patrimonio": "brb-80", "tipo": "Notebook", "setor": "Comercial",
+        "valor": "4.200,00", "observacao": "comprado em outubro", "por": "ana@aprovasim.com"})
+    assert r.status_code == 200
+    e = r.json()["equipamento"]
+    assert e["patrimonio"] == "BRB-80"
+    # a ficha (diferente da listagem) mostra valor e observação para quem edita
+    assert e["valor"] == 4200.0 and e["observacao"] == "comprado em outubro"
+
+
+def test_integracao_cadastro_repetido_nao_duplica(integra):
+    corpo = {"tipo": "Monitor", "origem_id": "radar-bilhete-1", "por": "ana@aprovasim.com"}
+    primeiro = integra.post("/api/integracao/equipamentos", headers=CH, json=corpo).json()
+    segundo = integra.post("/api/integracao/equipamentos", headers=CH, json=corpo).json()
+    assert segundo["repetido"] is True
+    assert segundo["equipamento"]["id"] == primeiro["equipamento"]["id"]
+
+
+def test_integracao_cadastro_sem_tipo_recusa(integra):
+    r = integra.post("/api/integracao/equipamentos", headers=CH, json={"patrimonio": "X"})
+    assert r.status_code == 400
+
+
+def test_integracao_patrimonio_repetido_409(integra):
+    integra.post("/api/integracao/equipamentos", headers=CH,
+                 json={"patrimonio": "BRB-81", "tipo": "Monitor"})
+    r = integra.post("/api/integracao/equipamentos", headers=CH,
+                     json={"patrimonio": "brb-81", "tipo": "Monitor"})
+    assert r.status_code == 409
+
+
+def test_integracao_edita_item(integra):
+    eid = integra.post("/api/integracao/equipamentos", headers=CH,
+                       json={"tipo": "Monitor", "setor": "CX"}).json()["equipamento"]["id"]
+    r = integra.patch(f"/api/integracao/equipamentos/{eid}", headers=CH,
+                      json={"descricao": "Dell 24", "condicao": "regular",
+                            "por": "ana@aprovasim.com"})
+    assert r.status_code == 200
+    assert r.json()["equipamento"]["descricao"] == "Dell 24"
+    assert r.json()["equipamento"]["condicao"] == "regular"
+
+
+def test_integracao_move_nas_seis_acoes(integra):
+    eid = integra.post("/api/integracao/equipamentos", headers=CH,
+                       json={"tipo": "Notebook"}).json()["equipamento"]["id"]
+    passos = [
+        ({"acao": "entrega", "colaborador_nome": "Ana Souza"}, "com_colaborador"),
+        ({"acao": "transferencia", "colaborador_nome": "Bruno Lima"}, "com_colaborador"),
+        ({"acao": "devolucao"}, "em_estoque"),
+        ({"acao": "manutencao"}, "manutencao"),
+        ({"acao": "retorno"}, "em_estoque"),
+        ({"acao": "baixa", "observacao": "quebrou"}, "baixado"),
+    ]
+    for corpo, esperado in passos:
+        r = integra.post(f"/api/integracao/equipamentos/{eid}/mover", headers=CH,
+                         json={**corpo, "por": "ana@aprovasim.com"})
+        assert r.status_code == 200, (corpo, r.text)
+        assert r.json()["equipamento"]["status"] == esperado, corpo
+
+
+def test_integracao_move_exige_pessoa_na_entrega(integra):
+    eid = integra.post("/api/integracao/equipamentos", headers=CH,
+                       json={"tipo": "Mouse"}).json()["equipamento"]["id"]
+    r = integra.post(f"/api/integracao/equipamentos/{eid}/mover", headers=CH,
+                     json={"acao": "entrega"})
+    assert r.status_code == 400
+
+
+def test_integracao_move_item_inexistente(integra):
+    r = integra.post("/api/integracao/equipamentos/9999/mover", headers=CH,
+                     json={"acao": "devolucao"})
+    assert r.status_code == 404
+
+
+def test_integracao_exclui_item(integra):
+    eid = integra.post("/api/integracao/equipamentos", headers=CH,
+                       json={"tipo": "Teclado"}).json()["equipamento"]["id"]
+    assert integra.delete(f"/api/integracao/equipamentos/{eid}", headers=CH).status_code == 200
+    assert integra.delete(f"/api/integracao/equipamentos/{eid}", headers=CH).status_code == 404
+
+
+def test_integracao_ficha_e_historico(integra):
+    eid = integra.post("/api/integracao/equipamentos", headers=CH,
+                       json={"tipo": "Headset", "valor": "199,90"}).json()["equipamento"]["id"]
+    ficha = integra.get(f"/api/integracao/equipamentos/{eid}", headers=CH)
+    assert ficha.status_code == 200 and ficha.json()["equipamento"]["valor"] == 199.9
+    assert integra.get("/api/integracao/equipamentos/9999", headers=CH).status_code == 404
+    hist = integra.get(f"/api/integracao/estoque/{eid}/historico", headers=CH)
+    assert hist.status_code == 200 and hist.json()["historico"]
+
+
+def test_integracao_colaboradores(integra):
+    r = integra.post("/api/integracao/colaboradores", headers=CH,
+                     json={"nome": "Carla Dias", "setor": "RH", "cargo": "Analista"})
+    assert r.status_code == 200
+    cid = r.json()["colaborador"]["id"]
+    r2 = integra.patch(f"/api/integracao/colaboradores/{cid}", headers=CH,
+                       json={"nome": "Carla Dias", "setor": "Financeiro"})
+    assert r2.status_code == 200 and r2.json()["colaborador"]["setor"] == "Financeiro"
+    assert integra.post("/api/integracao/colaboradores", headers=CH,
+                        json={"nome": " "}).status_code == 400
+
+
+def test_integracao_escrita_exige_chave(integra):
+    assert integra.post("/api/integracao/equipamentos", json={"tipo": "X"}).status_code == 401
+    assert integra.delete("/api/integracao/equipamentos/1").status_code == 401
+    assert integra.post("/api/integracao/colaboradores", json={"nome": "X"}).status_code == 401
+
+
+def test_integracao_listagem_continua_sem_valor(integra):
+    integra.post("/api/integracao/equipamentos", headers=CH,
+                 json={"tipo": "Projetor", "valor": "900", "observacao": "sala 2"})
+    itens = integra.get("/api/integracao/estoque", headers=CH).json()["itens"]
+    assert itens and all("valor" not in i and "observacao" not in i for i in itens)
+
+
+def test_integracao_registra_quem_fez_no_historico(integra, banco):
+    eid = integra.post("/api/integracao/equipamentos", headers=CH,
+                       json={"tipo": "Webcam", "por": "ana@aprovasim.com"}).json()["equipamento"]["id"]
+    item = banco.equipamentos[eid]
+    assert item["criado_por"] == "radar:ana@aprovasim.com"
